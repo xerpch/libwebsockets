@@ -1,5 +1,5 @@
 /*
- * libwebsockets - small server side websockets and web server implementation
+ * libwebsockets - generic hash and HMAC api hiding the backend
  *
  * Copyright (C) 2017 Andy Green <andy@warmcat.com>
  *
@@ -18,13 +18,13 @@
  *  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
  *  MA  02110-1301  USA
  *
- *  lws_genhash provides a hash abstraction api in lws that works the same
- *  whether you are using openssl or mbedtls hash functions underneath.
+ *  lws_genhash provides a hash / hmac abstraction api in lws that works the
+ *  same whether you are using openssl or mbedtls hash functions underneath.
  */
 #include "libwebsockets.h"
 
 size_t
-lws_genhash_size(int type)
+lws_genhash_size(enum lws_genhash_types type)
 {
 	switch(type) {
 	case LWS_GENHASH_TYPE_SHA1:
@@ -38,29 +38,25 @@ lws_genhash_size(int type)
 	return 0;
 }
 
+size_t
+lws_genhmac_size(enum lws_genhmac_types type)
+{
+	switch(type) {
+	case LWS_GENHMAC_TYPE_SHA256:
+		return 32;
+	case LWS_GENHMAC_TYPE_SHA384:
+		return 48;
+	case LWS_GENHMAC_TYPE_SHA512:
+		return 64;
+	}
+
+	return 0;
+}
+
 int
-lws_genhash_init(struct lws_genhash_ctx *ctx, int type)
+lws_genhash_init(struct lws_genhash_ctx *ctx, enum lws_genhash_types type)
 {
 	ctx->type = type;
-
-#if defined(LWS_WITH_MBEDTLS)
-	switch (ctx->type) {
-	case LWS_GENHASH_TYPE_SHA1:
-		mbedtls_sha1_init(&ctx->u.sha1);
-		mbedtls_sha1_starts(&ctx->u.sha1);
-		break;
-	case LWS_GENHASH_TYPE_SHA256:
-		mbedtls_sha256_init(&ctx->u.sha256);
-		mbedtls_sha256_starts(&ctx->u.sha256, 0);
-		break;
-	case LWS_GENHASH_TYPE_SHA512:
-		mbedtls_sha512_init(&ctx->u.sha512);
-		mbedtls_sha512_starts(&ctx->u.sha512, 0);
-		break;
-	default:
-		return 1;
-	}
-#else
 	ctx->mdctx = EVP_MD_CTX_create();
 	if (!ctx->mdctx)
 		return 1;
@@ -85,53 +81,18 @@ lws_genhash_init(struct lws_genhash_ctx *ctx, int type)
 		return 1;
 	}
 
-#endif
 	return 0;
 }
 
 int
 lws_genhash_update(struct lws_genhash_ctx *ctx, const void *in, size_t len)
 {
-#if defined(LWS_WITH_MBEDTLS)
-	switch (ctx->type) {
-	case LWS_GENHASH_TYPE_SHA1:
-		mbedtls_sha1_update(&ctx->u.sha1, in, len);
-		break;
-	case LWS_GENHASH_TYPE_SHA256:
-		mbedtls_sha256_update(&ctx->u.sha256, in, len);
-		break;
-	case LWS_GENHASH_TYPE_SHA512:
-		mbedtls_sha512_update(&ctx->u.sha512, in, len);
-		break;
-	}
-#else
 	return EVP_DigestUpdate(ctx->mdctx, in, len) != 1;
-#endif
-
-	return 0;
 }
 
 int
 lws_genhash_destroy(struct lws_genhash_ctx *ctx, void *result)
 {
-#if defined(LWS_WITH_MBEDTLS)
-	switch (ctx->type) {
-	case LWS_GENHASH_TYPE_SHA1:
-		mbedtls_sha1_finish(&ctx->u.sha1, result);
-		mbedtls_sha1_free(&ctx->u.sha1);
-		break;
-	case LWS_GENHASH_TYPE_SHA256:
-		mbedtls_sha256_finish(&ctx->u.sha256, result);
-		mbedtls_sha256_free(&ctx->u.sha256);
-		break;
-	case LWS_GENHASH_TYPE_SHA512:
-		mbedtls_sha512_finish(&ctx->u.sha512, result);
-		mbedtls_sha512_free(&ctx->u.sha512);
-		break;
-	}
-
-	return 0;
-#else
 	unsigned int len;
 	int ret = 0;
 
@@ -143,7 +104,71 @@ lws_genhash_destroy(struct lws_genhash_ctx *ctx, void *result)
 	EVP_MD_CTX_destroy(ctx->mdctx);
 
 	return ret;
-#endif
 }
 
+int
+lws_genhmac_init(struct lws_genhmac_ctx *ctx, enum lws_genhmac_types type,
+		 const uint8_t *key, size_t key_len)
+{
+	const char *ts;
+	const EVP_MD *md;
+	EVP_PKEY *pkey;
 
+	ctx->type = type;
+
+	switch (type) {
+	case LWS_GENHMAC_TYPE_SHA256:
+		ts = "SHA256";
+		break;
+	case LWS_GENHMAC_TYPE_SHA384:
+		ts = "SHA384";
+		break;
+	case LWS_GENHMAC_TYPE_SHA512:
+		ts = "SHA512";
+		break;
+	default:
+		return -1;
+	}
+
+        ctx->ctx = EVP_MD_CTX_create();
+        if (!ctx->ctx)
+		return -1;
+
+        md = EVP_get_digestbyname(ts);
+        if (!md)
+		return -1;
+
+        if (EVP_DigestInit_ex(ctx->ctx, md, NULL) != 1)
+		return -1;
+
+        pkey = EVP_PKEY_new_mac_key(EVP_PKEY_HMAC, NULL, key, key_len);
+
+        if (EVP_DigestSignInit(ctx->ctx, NULL, md, NULL, pkey) != 1)
+		return -1;
+
+        EVP_PKEY_free(pkey);
+
+	return 0;
+}
+
+int
+lws_genhmac_update(struct lws_genhmac_ctx *ctx, const void *in, size_t len)
+{
+	 if (EVP_DigestSignUpdate(ctx->ctx, in, len) != 1)
+		return -1;
+
+	return 0;
+}
+
+int
+lws_genhmac_destroy(struct lws_genhmac_ctx *ctx, void *result)
+{
+	size_t size = lws_genhmac_size(ctx->type);
+	int n = EVP_DigestSignFinal(ctx->ctx, result, &size);
+
+	EVP_MD_CTX_destroy(ctx->ctx);
+	if (n != 1)
+		return -1;
+
+	return 0;
+}
